@@ -1,0 +1,10 @@
+﻿venv/
+__pycache__/
+raw/
+Tempreture/
+output/
+*.grd
+*.nc
+processed/rainfall_seasonal.csv
+processed/temperature_district_monthly_1951_2025.csv
+processed/temperature_grid_monthly_1951_2025.csv
