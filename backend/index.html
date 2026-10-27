@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>India District Weather Map</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<style>
+  body { margin: 0; font-family: Segoe UI, Arial, sans-serif; }
+  #panel { position: absolute; top: 0; bottom: 0; left: 0; width: 280px;
+           padding: 14px; box-sizing: border-box; background: #f7f9fc;
+           border-right: 1px solid #ccd; overflow: auto; z-index: 500; }
+  #map { position: absolute; top: 0; bottom: 0; left: 280px; right: 0; }
+  select, input[type=range] { width: 100%; margin: 6px 0 12px; }
+  select { padding: 6px; }
+  #legendBar { height: 14px; border: 1px solid #999; margin: 4px 0; }
+  #legendLabels { display: flex; justify-content: space-between; font-size: 12px; }
+  #info { font-size: 14px; line-height: 1.5; margin-top: 10px; }
+</style>
+</head>
+<body>
+<div id="panel">
+  <h3>India District Weather</h3>
+  <label>Layer</label>
+  <select id="layer">
+    <option value="rain">Annual rainfall</option>
+    <option value="dry">Dryness score</option>
+    <option value="temp">Max temperature</option>
+  </select>
+
+  <label>Year: <b id="yearLabel">2020</b></label>
+  <input type="range" id="year" min="1901" max="2025" value="2020">
+
+  <div id="monthBox" style="display:none">
+    <label>Month: <b id="monthLabel">5</b></label>
+    <input type="range" id="month" min="1" max="12" value="5">
+  </div>
+
+  <div id="legendBar"></div>
+  <div id="legendLabels"><span id="legMin"></span><span id="legMax"></span></div>
+  <div id="legendName" style="font-size:12px;margin-top:4px"></div>
+
+  <hr>
+  <div id="info">Click a district for details.</div>
+</div>
+<div id="map"></div>
+
+<script>
+const map = L.map('map').setView([22.5, 80], 5);
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  attribution: '&copy; OpenStreetMap'
+}).addTo(map);
+
+const SCALES = {
+  rain: { min: 0,  max: 3000, stops: ['#f7fbff', '#6baed6', '#08306b'], name: 'Annual rainfall (mm)' },
+  dry:  { min: 0,  max: 1,    stops: ['#fff5eb', '#fd8d3c', '#7f2704'], name: 'Dryness score (0 to 1)' },
+  temp: { min: 10, max: 45,   stops: ['#2b83ba', '#ffffbf', '#d7191c'], name: 'Max temperature (°C)' }
+};
+const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+
+let boundaries = null, geoLayer = null;
+let rainData = {}, dryData = {}, tempData = {};
+
+async function getJSON(url) {
+  const r = await fetch(url);
+  if (!r.ok) return null;
+  return r.json();
+}
+
+function hexToRgb(h) {
+  return [1, 3, 5].map(i => parseInt(h.substr(i, 2), 16));
+}
+
+function mix(a, b, t) {
+  const pa = hexToRgb(a), pb = hexToRgb(b);
+  return 'rgb(' + pa.map((x, i) => Math.round(x + (pb[i] - x) * t)).join(',') + ')';
+}
+
+function colorFor(v, sc) {
+  if (v === null || v === undefined || isNaN(v)) return '#cccccc';
+  let t = (v - sc.min) / (sc.max - sc.min);
+  t = Math.max(0, Math.min(1, t));
+  const n = sc.stops.length - 1;
+  const seg = Math.min(n - 1, Math.floor(t * n));
+  return mix(sc.stops[seg], sc.stops[seg + 1], t * n - seg);
+}
+
+function currentState() {
+  return {
+    layer: document.getElementById('layer').value,
+    year: +document.getElementById('year').value,
+    month: +document.getElementById('month').value
+  };
+}
+
+async function loadData(s) {
+  if (s.layer === 'rain') {
+    const rows = await getJSON(`/map/rainfall?year=${s.year}`) || [];
+    rainData = Object.fromEntries(rows.map(r => [r.match_key, r.rain_mm]));
+  } else if (s.layer === 'dry') {
+    if (!Object.keys(dryData).length) {
+      const rows = await getJSON('/map/dryness') || [];
+      dryData = Object.fromEntries(rows.map(r => [r.match_key, r]));
+    }
+  } else {
+    const rows = await getJSON(`/map/temperature?year=${s.year}&month=${s.month}`) || [];
+    tempData = Object.fromEntries(rows.map(r => [r.GID_2, r.tmax_mean]));
+  }
+}
+
+function valueOf(p, s) {
+  if (s.layer === 'rain') return rainData[p.match_key];
+  if (s.layer === 'dry') return dryData[p.match_key] ? dryData[p.match_key].dryness_score : null;
+  return tempData[p.GID_2];
+}
+
+function drawLegend(sc) {
+  document.getElementById('legendBar').style.background =
+    `linear-gradient(to right, ${sc.stops.join(',')})`;
+  document.getElementById('legMin').textContent = sc.min;
+  document.getElementById('legMax').textContent = sc.max + '+';
+  document.getElementById('legendName').textContent = sc.name + '  (grey = no data)';
+}
+
+async function render() {
+  const s = currentState();
+  await loadData(s);
+  if (geoLayer) map.removeLayer(geoLayer);
+  const sc = SCALES[s.layer];
+  geoLayer = L.geoJSON(boundaries, {
+    style: f => ({
+      fillColor: colorFor(valueOf(f.properties, s), sc),
+      color: '#444', weight: 0.4, fillOpacity: 0.85
+    }),
+    onEachFeature: (f, layer) => {
+      layer.bindTooltip(`${f.properties.district}, ${f.properties.state}`);
+      layer.on('click', () => showInfo(f.properties, s));
+    }
+  }).addTo(map);
+  drawLegend(sc);
+}
+
+async function showInfo(p, s) {
+  const info = document.getElementById('info');
+  info.innerHTML = `<b>${p.district}</b>, ${p.state}<br>Loading...`;
+  let html = `<b>${p.district}</b>, ${p.state}<br>`;
+
+  if (s.layer === 'rain' || s.layer === 'dry') {
+    const c = await getJSON(`/compare/${encodeURIComponent(p.match_key)}?year=${s.year}`);
+    if (c) {
+      html += `Year ${c.year}: <b>${c.this_year_mm} mm</b><br>` +
+              `Normal (1991-2020): ${c.normal_1991_2020_mm} mm<br>` +
+              `Departure: ${c.departure_from_normal_pct}% (${c.status})<br>`;
+    } else {
+      html += `No valid rainfall for ${s.year}<br>`;
+    }
+  }
+  if (s.layer === 'dry' && dryData[p.match_key]) {
+    const d = dryData[p.match_key];
+    html += `<br>Dryness score: <b>${d.dryness_score}</b><br>` +
+            `Dry chance (years below 25th percentile): ${Math.round(d.dry_chance_all_years * 100)}%<br>`;
+  }
+  if (s.layer === 'temp') {
+    const v = tempData[p.GID_2];
+    html += v !== null && v !== undefined
+      ? `${MONTHS[s.month - 1]} ${s.year} max temp: <b>${v} °C</b><br>`
+      : `No temperature for ${MONTHS[s.month - 1]} ${s.year}<br>`;
+  }
+  info.innerHTML = html;
+}
+
+function setControls() {
+  const layer = document.getElementById('layer').value;
+  const year = document.getElementById('year');
+  const minY = layer === 'temp' ? 1951 : 1901;
+  year.min = minY;
+  if (+year.value < minY) year.value = minY;
+  document.getElementById('yearLabel').textContent = year.value;
+  document.getElementById('monthBox').style.display = layer === 'temp' ? 'block' : 'none';
+}
+
+document.getElementById('layer').addEventListener('change', () => { setControls(); render(); });
+document.getElementById('year').addEventListener('input', e =>
+  document.getElementById('yearLabel').textContent = e.target.value);
+document.getElementById('year').addEventListener('change', render);
+document.getElementById('month').addEventListener('input', e =>
+  document.getElementById('monthLabel').textContent = e.target.value);
+document.getElementById('month').addEventListener('change', render);
+
+(async () => {
+  boundaries = await getJSON('/boundaries');
+  setControls();
+  render();
+})();
+</script>
+</body>
+</html>

@@ -1,19 +1,28 @@
+import json
 import re
 from functools import lru_cache
 from pathlib import Path
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from shapely.geometry import mapping, shape
 
 BASE = Path(__file__).resolve().parents[1]   # C:\p1
 RAW = BASE / "raw"
 PROC = BASE / "processed"
+HERE = Path(__file__).resolve().parent
 
-app = FastAPI(title="Weather App API", version="0.3")
+app = FastAPI(title="Weather App API", version="0.4")
 
 
 def make_key(s):
     return re.sub(r"[^a-z0-9]", "", str(s).lower())
+
+
+def clean(df):
+    """Convert to JSON-safe records (NaN becomes null)."""
+    return df.astype(object).where(pd.notna(df), None).to_dict("records")
 
 
 @lru_cache(maxsize=1)
@@ -37,10 +46,35 @@ def dry():
     return pd.read_csv(PROC / "dry_region_metrics.csv")
 
 @lru_cache(maxsize=1)
+def temp():
+    return pd.read_csv(PROC / "temperature_district_monthly_1951_2025.csv")
+
+@lru_cache(maxsize=1)
 def monthly():
     df = pd.read_csv(RAW / "district_monthly_rainfall_1901_2025.csv")
     df["match_key"] = df["state"].map(make_key) + "|" + df["district"].map(make_key)
     return df[["match_key", "year", "month", "rain_mm"]]
+
+@lru_cache(maxsize=1)
+def boundaries():
+    """District polygons, simplified so the map loads quickly."""
+    with open(RAW / "gadm41_IND_2.json", encoding="utf-8") as f:
+        g = json.load(f)
+    feats = []
+    for ft in g["features"]:
+        p = ft["properties"]
+        geom = shape(ft["geometry"]).simplify(0.02, preserve_topology=True)
+        feats.append({
+            "type": "Feature",
+            "geometry": mapping(geom),
+            "properties": {
+                "GID_2": p["GID_2"],
+                "state": p["NAME_1"],
+                "district": p["NAME_2"],
+                "match_key": f"{make_key(p['NAME_1'])}|{make_key(p['NAME_2'])}",
+            },
+        })
+    return {"type": "FeatureCollection", "features": feats}
 
 
 def get_district(key):
@@ -59,9 +93,23 @@ def annual_value(key, year):
     return float(r.rain_mm.iloc[0])
 
 
+# ---------- Web page ----------
+
+@app.get("/", include_in_schema=False)
+def index():
+    return FileResponse(HERE / "index.html")
+
+
+# ---------- Data endpoints ----------
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.get("/boundaries")
+def get_boundaries():
+    return boundaries()
 
 
 @app.get("/districts")
@@ -70,7 +118,7 @@ def districts(include_no_data: bool = False):
     if not include_no_data:
         q = q[q.status != "no_data"]
     out = q.rename(columns={"NAME_1": "state", "NAME_2": "district"})
-    return out[["match_key", "state", "district", "status", "valid_years"]].to_dict("records")
+    return clean(out[["match_key", "state", "district", "status", "valid_years"]])
 
 
 @app.get("/rainfall/{key}")
@@ -79,14 +127,14 @@ def rainfall(key: str, year: int | None = None):
     if year is None:
         a = annual()
         a = a[(a.match_key == key) & a.rain_mm.notna()]
-        return {"match_key": key, "years": a[["year", "rain_mm"]].to_dict("records")}
+        return {"match_key": key, "years": clean(a[["year", "rain_mm"]])}
     total = annual_value(key, year)
     if total is None:
         raise HTTPException(404, f"No valid data for {key} in {year}")
     m = monthly()
     mm = m[(m.match_key == key) & (m.year == year)]
     return {"match_key": key, "year": year, "annual_mm": round(total, 1),
-            "monthly": mm[["month", "rain_mm"]].to_dict("records")}
+            "monthly": clean(mm[["month", "rain_mm"]])}
 
 
 @app.get("/compare/{key}")
@@ -132,12 +180,43 @@ def dry_regions(top: int = Query(20, ge=1, le=100)):
     d = dry().merge(names, on="match_key", how="left")
     d = d.sort_values("dryness_score", ascending=False).head(top)
     d = d.rename(columns={"NAME_1": "state", "NAME_2": "district"})
-    return d[["match_key", "state", "district", "dryness_score",
-              "dry_chance_all_years", "mean_rain_train"]].to_dict("records")
+    return clean(d[["match_key", "state", "district", "dryness_score",
+                    "dry_chance_all_years", "mean_rain_train"]])
 
 
 @app.get("/map/rainfall")
 def map_rainfall(year: int = Query(..., ge=1901, le=2025)):
     a = annual()
     a = a[(a.year == year) & a.rain_mm.notna()]
-    return a[["match_key", "rain_mm"]].round(1).to_dict("records")
+    return clean(a[["match_key", "rain_mm"]].round(1))
+
+
+@app.get("/map/dryness")
+def map_dryness():
+    return clean(dry()[["match_key", "dryness_score", "dry_chance_all_years"]])
+
+
+@app.get("/map/temperature")
+def map_temperature(year: int = Query(..., ge=1951, le=2025),
+                    month: int | None = Query(None, ge=1, le=12)):
+    t = temp()
+    t = t[t.year == year]
+    if month is not None:
+        t = t[t.month == month]
+        out = t[["GID_2", "tmax_mean"]]
+    else:
+        out = t.groupby("GID_2", as_index=False)["tmax_mean"].mean().round(2)
+    return clean(out)
+
+
+@app.get("/temperature/{gid}")
+def temperature(gid: str, year: int | None = None):
+    t = temp()
+    t = t[t.GID_2 == gid]
+    if t.empty:
+        raise HTTPException(404, f"No temperature data for {gid}")
+    name = t.iloc[0]
+    if year is not None:
+        t = t[t.year == year]
+    return {"GID_2": gid, "state": name["state"], "district": name["district"],
+            "rows": clean(t[["year", "month", "tmax_mean"]])}
