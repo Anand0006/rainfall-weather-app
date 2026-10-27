@@ -1,10 +1,13 @@
 ﻿venv/
 __pycache__/
-raw/
-Tempreture/
+models/
 output/
+Tempreture/
 *.grd
+*.GRD
 *.nc
+*.PY
 processed/rainfall_seasonal.csv
-processed/temperature_district_monthly_1951_2025.csv
 processed/temperature_grid_monthly_1951_2025.csv
+processed/landslide_district_monthly_2007_2017.csv
+processed/phase6_pilot_uttar_pradesh_metrics.csv
