@@ -27,6 +27,8 @@
     <option value="dry">Dryness score</option>
     <option value="temp">Max temperature</option>
     <option value="land">Landslide events</option>
+    <option value="type">Rainfall type (grouping)</option>
+    <option value="unusual">Unusually wet or dry year</option>
   </select>
 
   <label id="yearBox">Year: <b id="yearLabel">2020</b></label>
@@ -56,12 +58,22 @@ const SCALES = {
   rain: { min: 0,  max: 3000, stops: ['#f7fbff', '#6baed6', '#08306b'], name: 'Annual rainfall (mm)' },
   dry:  { min: 0,  max: 1,    stops: ['#fff5eb', '#fd8d3c', '#7f2704'], name: 'Dryness: relative ranking across India (not absolute)' },
   temp: { min: 10, max: 45,   stops: ['#2b83ba', '#ffffbf', '#d7191c'], name: 'Max temperature (°C), 1° grid' },
-  land: { min: 0,  max: 20,   stops: ['#fff7fb', '#bdc9e1', '#810f7c'], name: 'Reported landslide events in the year (news-based, incomplete)' }
+  land: { min: 0,  max: 20,   stops: ['#fff7fb', '#bdc9e1', '#810f7c'], name: 'Reported landslide events in the year (news-based, incomplete)' },
+  type: { cat: true, name: 'Rainfall type: statistical grouping of the 1951-2020 monthly pattern, not a forecast', legend: '' },
+  unusual: { cat: true, name: 'Year compared with the 1991-2020 normal range (10th to 90th percentile)', legend: 'Blue: unusually wet. Brown: unusually dry. Grey: within normal range.' }
+};
+
+const TYPE_COLORS = { 1: '#fdae61', 2: '#2b83ba', 3: '#abdda4', 4: '#d7191c' };
+const FLAG_COLORS = { 'unusually wet': '#2166ac', 'unusually dry': '#b2182b', 'within normal range': '#e0e0e0' };
+const FLAG_TEXT = {
+  'unusually wet': 'Unusually wet compared with the 1991 to 2020 normal range',
+  'unusually dry': 'Unusually dry compared with the 1991 to 2020 normal range',
+  'within normal range': 'Within the 1991 to 2020 normal range'
 };
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
-let boundaries = null, geoLayer = null;
-let rainData = {}, dryData = {}, tempData = {}, landData = {};
+let boundaries = null, geoLayer = null, profileRows = [];
+let rainData = {}, dryData = {}, tempData = {}, landData = {}, typeData = {}, unusualData = {};
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -110,6 +122,14 @@ async function loadData(s) {
   } else if (s.layer === 'land') {
     const rows = await getJSON(`/map/landslides?year_from=${s.year}&year_to=${s.year}`) || [];
     landData = Object.fromEntries(rows.map(r => [r.GID_2, r.events]));
+  } else if (s.layer === 'type') {
+    if (!Object.keys(typeData).length) {
+      const rows = await getJSON('/map/rainfall-type') || [];
+      typeData = Object.fromEntries(rows.map(r => [r.GID_2, r.rainfall_type]));
+    }
+  } else if (s.layer === 'unusual') {
+    const rows = await getJSON(`/map/unusual-years?year=${s.year}`) || [];
+    unusualData = Object.fromEntries(rows.map(r => [r.GID_2, r]));
   }
 }
 
@@ -120,12 +140,30 @@ function valueOf(p, s) {
   return tempData[p.GID_2];
 }
 
+function fillFor(p, s, sc) {
+  if (s.layer === 'type') return TYPE_COLORS[typeData[p.GID_2]] || '#cccccc';
+  if (s.layer === 'unusual') {
+    const u = unusualData[p.GID_2];
+    return u ? (FLAG_COLORS[u.flag] || '#cccccc') : '#cccccc';
+  }
+  return colorFor(valueOf(p, s), sc);
+}
+
 function drawLegend(sc) {
-  document.getElementById('legendBar').style.background =
-    `linear-gradient(to right, ${sc.stops.join(',')})`;
-  document.getElementById('legMin').textContent = sc.min;
-  document.getElementById('legMax').textContent = sc.max + '+';
-  document.getElementById('legendName').textContent = sc.name + '  (grey = no data)';
+  const bar = document.getElementById('legendBar');
+  const labels = document.getElementById('legendLabels');
+  if (sc.cat) {
+    bar.style.display = 'none';
+    labels.style.display = 'none';
+  } else {
+    bar.style.display = 'block';
+    labels.style.display = 'flex';
+    bar.style.background = `linear-gradient(to right, ${sc.stops.join(',')})`;
+    document.getElementById('legMin').textContent = sc.min;
+    document.getElementById('legMax').textContent = sc.max + '+';
+  }
+  const extra = sc.legend ? ' ' + sc.legend : '';
+  document.getElementById('legendName').textContent = sc.name + extra + '  (grey = no data)';
 }
 
 async function render() {
@@ -135,7 +173,7 @@ async function render() {
   const sc = SCALES[s.layer];
   geoLayer = L.geoJSON(boundaries, {
     style: f => ({
-      fillColor: colorFor(valueOf(f.properties, s), sc),
+      fillColor: fillFor(f.properties, s, sc),
       color: '#444', weight: 0.4, fillOpacity: 0.85
     }),
     onEachFeature: (f, layer) => {
@@ -179,7 +217,7 @@ async function showInfo(p, s) {
       html += `Events in ${s.year}: <b>${yr ? yr.events : 0}</b><br>` +
               `Total 2007 to 2017: <b>${L.total_events}</b><br>`;
       if (L.recent_events.length) {
-                html += `<br><b>Recent events (2007 to 2017)</b><table style="font-size:12px">` +
+        html += `<br><b>Recent events (2007 to 2017)</b><table style="font-size:12px">` +
           L.recent_events.map(e =>
             `<tr><td>${e.event_date}</td><td>${e.landslide_category}</td></tr>`).join('') +
           `</table>`;
@@ -188,6 +226,31 @@ async function showInfo(p, s) {
       }
       html += `<div style="font-size:11px;color:#666;margin-top:6px">Source: NASA Global Landslide Catalog ` +
               `(news and reports). Counts reflect reporting, not hazard alone.</div>`;
+    }
+  }
+  if (s.layer === 'type') {
+    const t = typeData[p.GID_2];
+    if (t) {
+      const prof = profileRows.find(r => r.rainfall_type === t);
+      html += `<b>Rainfall type ${t}</b><br>` +
+              `Peak month: ${prof ? prof.peak_month : '-'}<br>` +
+              `Average share of rain in June to September: ${prof ? prof.share_jun_sep_pct : '-'}%<br>` +
+              `<div style="font-size:11px;color:#666;margin-top:6px">Statistical grouping of the 1951 to 2020 ` +
+              `monthly pattern. Not a forecast. Source: IMD gridded rainfall, processed for this app.</div>`;
+    } else {
+      html += `No rainfall type (incomplete record for this district).<br>`;
+    }
+  }
+  if (s.layer === 'unusual') {
+    const u = unusualData[p.GID_2];
+    if (u) {
+      html += `Year ${s.year}: <b>${u.annual_mm} mm</b><br>` +
+              `Normal range 1991 to 2020 (10th to 90th percentile): ${u.p10_mm} to ${u.p90_mm} mm<br>` +
+              `<b>${FLAG_TEXT[u.flag] || u.flag}</b><br>` +
+              `<div style="font-size:11px;color:#666;margin-top:6px">Historical comparison, not a forecast. ` +
+              `Source: IMD gridded rainfall, processed for this app.</div>`;
+    } else {
+      html += `No complete rainfall record for ${s.year}.<br>`;
     }
   }
 
@@ -224,9 +287,9 @@ function setControls() {
   if (+year.value < minY) year.value = minY;
   if (+year.value > maxY) year.value = maxY;
   document.getElementById('yearLabel').textContent = year.value;
-  const dryMode = layer === 'dry';
-  document.getElementById('yearBox').style.display = dryMode ? 'none' : 'block';
-  year.style.display = dryMode ? 'none' : 'block';
+  const noYear = layer === 'dry' || layer === 'type';
+  document.getElementById('yearBox').style.display = noYear ? 'none' : 'block';
+  year.style.display = noYear ? 'none' : 'block';
   document.getElementById('monthBox').style.display = layer === 'temp' ? 'block' : 'none';
 }
 
@@ -240,9 +303,13 @@ document.getElementById('month').addEventListener('change', render);
 
 (async () => {
   boundaries = await getJSON('/boundaries');
+  profileRows = await getJSON('/rainfall-types') || [];
+  SCALES.type.legend = profileRows.map(r =>
+    `Type ${r.rainfall_type}: ${r.peak_month} peak, ${r.share_jun_sep_pct}% in June to September (${r.districts} districts).`
+  ).join(' ');
   setControls();
   render();
 })();
 </script>
 </body>
-</html> 
+</html>

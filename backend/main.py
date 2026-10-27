@@ -361,3 +361,39 @@ def landslides(gid: str, year_from: int = Query(2007, ge=2007, le=2017),
         "by_year": clean(y[["year", "events"]]),
         "recent_events": clean(recent[["event_date", "landslide_category"]]),
     }
+
+
+
+# ---------- Rainfall type and unusual years (Phase 6) ----------
+
+@lru_cache(maxsize=1)
+def rain_types():
+    return pd.read_csv(PROC / "rainfall_type_districts.csv")
+
+
+@lru_cache(maxsize=1)
+def rain_type_profile():
+    return pd.read_csv(PROC / "rainfall_type_profile.csv")
+
+
+@lru_cache(maxsize=1)
+def unusual():
+    return pd.read_csv(PROC / "rainfall_unusual_years.csv")
+
+
+@app.get("/map/rainfall-type")
+def map_rainfall_type():
+    return clean(rain_types()[["GID_2", "rainfall_type"]])
+
+
+@app.get("/rainfall-types")
+def rainfall_types():
+    p = rain_type_profile()[["rainfall_type", "districts", "peak_month", "share_jun_sep_pct"]]
+    return clean(p)
+
+
+@app.get("/map/unusual-years")
+def map_unusual(year: int = Query(..., ge=1901, le=2025)):
+    u = unusual()
+    u = u[u.year == year]
+    return clean(u[["GID_2", "flag", "annual_mm", "p10_mm", "p90_mm"]])
