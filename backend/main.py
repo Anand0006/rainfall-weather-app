@@ -7,6 +7,10 @@ import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from shapely.geometry import mapping, shape
+import time
+from datetime import datetime
+from urllib.parse import urlencode
+from urllib.request import urlopen
 
 BASE = Path(__file__).resolve().parents[1]   # C:\p1
 RAW = BASE / "raw"
@@ -220,3 +224,140 @@ def temperature(gid: str, year: int | None = None):
         t = t[t.year == year]
     return {"GID_2": gid, "state": name["state"], "district": name["district"],
             "rows": clean(t[["year", "month", "tmax_mean"]])}
+
+# ---------- Live forecast (Phase 7) ----------
+
+LIVE_CACHE_SECONDS = 30 * 60
+_live_cache = {}
+
+WEATHER_LABELS = {
+    0: "Clear", 1: "Mainly clear", 2: "Partly cloudy", 3: "Overcast",
+    45: "Fog", 48: "Fog", 51: "Light drizzle", 53: "Drizzle", 55: "Heavy drizzle",
+    61: "Light rain", 63: "Rain", 65: "Heavy rain", 71: "Light snow", 73: "Snow",
+    75: "Heavy snow", 80: "Light showers", 81: "Showers", 82: "Heavy showers",
+    95: "Thunderstorm", 96: "Thunderstorm with hail", 99: "Thunderstorm with hail",
+}
+
+
+@lru_cache(maxsize=1)
+def centres():
+    """One point inside each district, used for the live forecast."""
+    with open(RAW / "gadm41_IND_2.json", encoding="utf-8") as f:
+        g = json.load(f)
+    out = {}
+    for ft in g["features"]:
+        pt = shape(ft["geometry"]).representative_point()
+        out[ft["properties"]["GID_2"]] = (round(pt.y, 4), round(pt.x, 4))
+    return out
+
+
+@app.get("/live/{gid}")
+def live(gid: str):
+    now = time.time()
+    cached = _live_cache.get(gid)
+    if cached and now - cached[0] < LIVE_CACHE_SECONDS:
+        return cached[1]
+
+    if gid not in centres():
+        raise HTTPException(404, f"Unknown district: {gid}")
+    lat, lon = centres()[gid]
+
+    params = urlencode({
+        "latitude": lat,
+        "longitude": lon,
+        "current": "temperature_2m,relative_humidity_2m,precipitation,weather_code",
+        "daily": "weather_code,temperature_2m_max,temperature_2m_min,precipitation_sum",
+        "timezone": "Asia/Kolkata",
+        "forecast_days": 7,
+    })
+    url = f"https://api.open-meteo.com/v1/forecast?{params}"
+    try:
+        with urlopen(url, timeout=10) as r:
+            data = json.load(r)
+    except Exception:
+        raise HTTPException(503, "Forecast service unavailable. Try again later.")
+
+    cur = data.get("current", {})
+    daily = data.get("daily", {})
+    days = []
+    for i, day in enumerate(daily.get("time", [])):
+        code = daily["weather_code"][i]
+        days.append({
+            "date": day,
+            "max_c": daily["temperature_2m_max"][i],
+            "min_c": daily["temperature_2m_min"][i],
+            "rain_mm": daily["precipitation_sum"][i],
+            "condition": WEATHER_LABELS.get(code, "Unknown"),
+        })
+
+    code = cur.get("weather_code")
+    result = {
+        "GID_2": gid,
+        "latitude": lat,
+        "longitude": lon,
+        "current": {
+            "time": cur.get("time"),
+            "temp_c": cur.get("temperature_2m"),
+            "humidity_pct": cur.get("relative_humidity_2m"),
+            "rain_mm": cur.get("precipitation"),
+            "condition": WEATHER_LABELS.get(code, "Unknown"),
+        },
+        "daily": days,
+        "fetched_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "cache_minutes": LIVE_CACHE_SECONDS // 60,
+        "attribution": "Weather data by Open-Meteo.com (CC BY 4.0)",
+    }
+    _live_cache[gid] = (now, result)
+    return result
+
+
+
+# ---------- Landslides (Phase 5) ----------
+
+def _ls_file(kind):
+    matches = sorted(PROC.glob(f"landslide_{kind}_*.csv"))
+    if not matches:
+        raise HTTPException(503, f"Landslide file '{kind}' not found in processed folder")
+    return matches[0]
+
+
+@lru_cache(maxsize=1)
+def ls_yearly():
+    return pd.read_csv(_ls_file("district_yearly"))
+
+
+@lru_cache(maxsize=1)
+def ls_events():
+    return pd.read_csv(PROC / "landslide_events_india.csv", parse_dates=["event_date"])
+
+
+@app.get("/map/landslides")
+def map_landslides(year_from: int = Query(2007, ge=2007, le=2017),
+                   year_to: int = Query(2017, ge=2007, le=2017)):
+    y = ls_yearly()
+    y = y[(y.year >= year_from) & (y.year <= year_to)]
+    out = y.groupby("GID_2", as_index=False)["events"].sum()
+    return clean(out)
+
+
+@app.get("/landslides/{gid}")
+def landslides(gid: str, year_from: int = Query(2007, ge=2007, le=2017),
+               year_to: int = Query(2017, ge=2007, le=2017)):
+    y = ls_yearly()
+    y = y[(y.GID_2 == gid) & (y.year >= year_from) & (y.year <= year_to)]
+    if y.empty:
+        raise HTTPException(404, f"No landslide record for {gid}")
+    ev = ls_events()
+    ev = ev[(ev.GID_2 == gid) & (ev.year >= year_from) & (ev.year <= year_to)]
+    recent = ev.sort_values("event_date", ascending=False).head(15).copy()
+    recent = ev.sort_values("event_date", ascending=False).head(15).copy()
+    recent["event_date"] = recent["event_date"].dt.strftime("%Y-%m-%d")
+    recent["landslide_category"] = recent["landslide_category"].fillna("unknown")
+    return {
+        "GID_2": gid,
+        "state": y.state.iloc[0],
+        "district": y.district.iloc[0],
+        "total_events": int(y.events.sum()),
+        "by_year": clean(y[["year", "events"]]),
+        "recent_events": clean(recent[["event_date", "landslide_category"]]),
+    }

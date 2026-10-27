@@ -1,0 +1,3 @@
+method,MAE_mm,RMSE_mm
+climatology baseline,36.1,60.5
+gradient boosting,36.1,60.5

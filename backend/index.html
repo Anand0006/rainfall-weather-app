@@ -26,9 +26,10 @@
     <option value="rain">Annual rainfall</option>
     <option value="dry">Dryness score</option>
     <option value="temp">Max temperature</option>
+    <option value="land">Landslide events</option>
   </select>
 
-  <label>Year: <b id="yearLabel">2020</b></label>
+  <label id="yearBox">Year: <b id="yearLabel">2020</b></label>
   <input type="range" id="year" min="1901" max="2025" value="2020">
 
   <div id="monthBox" style="display:none">
@@ -54,12 +55,13 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 const SCALES = {
   rain: { min: 0,  max: 3000, stops: ['#f7fbff', '#6baed6', '#08306b'], name: 'Annual rainfall (mm)' },
   dry:  { min: 0,  max: 1,    stops: ['#fff5eb', '#fd8d3c', '#7f2704'], name: 'Dryness: relative ranking across India (not absolute)' },
-  temp: { min: 10, max: 45,   stops: ['#2b83ba', '#ffffbf', '#d7191c'], name: 'Max temperature (°C)' }
+  temp: { min: 10, max: 45,   stops: ['#2b83ba', '#ffffbf', '#d7191c'], name: 'Max temperature (°C), 1° grid' },
+  land: { min: 0,  max: 20,   stops: ['#fff7fb', '#bdc9e1', '#810f7c'], name: 'Reported landslide events in the year (news-based, incomplete)' }
 };
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
 
 let boundaries = null, geoLayer = null;
-let rainData = {}, dryData = {}, tempData = {};
+let rainData = {}, dryData = {}, tempData = {}, landData = {};
 
 async function getJSON(url) {
   const r = await fetch(url);
@@ -102,15 +104,19 @@ async function loadData(s) {
       const rows = await getJSON('/map/dryness') || [];
       dryData = Object.fromEntries(rows.map(r => [r.match_key, r]));
     }
-  } else {
+  } else if (s.layer === 'temp') {
     const rows = await getJSON(`/map/temperature?year=${s.year}&month=${s.month}`) || [];
     tempData = Object.fromEntries(rows.map(r => [r.GID_2, r.tmax_mean]));
+  } else if (s.layer === 'land') {
+    const rows = await getJSON(`/map/landslides?year_from=${s.year}&year_to=${s.year}`) || [];
+    landData = Object.fromEntries(rows.map(r => [r.GID_2, r.events]));
   }
 }
 
 function valueOf(p, s) {
   if (s.layer === 'rain') return rainData[p.match_key];
   if (s.layer === 'dry') return dryData[p.match_key] ? dryData[p.match_key].dryness_score : null;
+  if (s.layer === 'land') return landData[p.GID_2];
   return tempData[p.GID_2];
 }
 
@@ -166,20 +172,61 @@ async function showInfo(p, s) {
       ? `${MONTHS[s.month - 1]} ${s.year} max temp: <b>${v} °C</b><br>`
       : `No temperature for ${MONTHS[s.month - 1]} ${s.year}<br>`;
   }
+  if (s.layer === 'land') {
+    const L = await getJSON(`/landslides/${encodeURIComponent(p.GID_2)}?year_from=2007&year_to=2017`);
+    if (L) {
+      const yr = L.by_year.find(r => r.year === s.year);
+      html += `Events in ${s.year}: <b>${yr ? yr.events : 0}</b><br>` +
+              `Total 2007 to 2017: <b>${L.total_events}</b><br>`;
+      if (L.recent_events.length) {
+                html += `<br><b>Recent events (2007 to 2017)</b><table style="font-size:12px">` +
+          L.recent_events.map(e =>
+            `<tr><td>${e.event_date}</td><td>${e.landslide_category}</td></tr>`).join('') +
+          `</table>`;
+      } else {
+        html += `No recorded events.<br>`;
+      }
+      html += `<div style="font-size:11px;color:#666;margin-top:6px">Source: NASA Global Landslide Catalog ` +
+              `(news and reports). Counts reflect reporting, not hazard alone.</div>`;
+    }
+  }
+
+  // Live forecast
+  const f = await getJSON(`/live/${encodeURIComponent(p.GID_2)}`);
+  if (f) {
+    html += `<hr><b>Live weather now</b><br>` +
+            `${f.current.temp_c} °C, humidity ${f.current.humidity_pct}%<br>` +
+            `${f.current.condition}, rain ${f.current.rain_mm} mm<br>` +
+            `<table style="font-size:12px;margin-top:6px;border-collapse:collapse">` +
+            `<tr><th align="left">Day</th><th>Max</th><th>Min</th><th>Rain</th><th align="left">Sky</th></tr>` +
+            f.daily.map(d =>
+              `<tr><td>${d.date.slice(5)}</td><td align="center">${d.max_c}°</td>` +
+              `<td align="center">${d.min_c}°</td><td align="center">${d.rain_mm}</td>` +
+              `<td>${d.condition}</td></tr>`).join('') +
+            `</table>` +
+            `<div style="font-size:11px;color:#666;margin-top:6px">${f.attribution}. ` +
+            `Updated ${f.fetched_at}, refreshes every ${f.cache_minutes} min.</div>`;
+  } else {
+    html += `<hr>Live forecast unavailable right now.`;
+  }
+
   info.innerHTML = html;
 }
 
 function setControls() {
   const layer = document.getElementById('layer').value;
   const year = document.getElementById('year');
-  const yearLabel = document.getElementById('yearLabel').parentElement;
-  const minY = layer === 'temp' ? 1951 : 1901;
+  let minY = 1901, maxY = 2025;
+  if (layer === 'temp') minY = 1951;
+  if (layer === 'land') { minY = 2007; maxY = 2017; }
   year.min = minY;
+  year.max = maxY;
   if (+year.value < minY) year.value = minY;
+  if (+year.value > maxY) year.value = maxY;
   document.getElementById('yearLabel').textContent = year.value;
   const dryMode = layer === 'dry';
+  document.getElementById('yearBox').style.display = dryMode ? 'none' : 'block';
   year.style.display = dryMode ? 'none' : 'block';
-  yearLabel.style.display = dryMode ? 'none' : 'block';
   document.getElementById('monthBox').style.display = layer === 'temp' ? 'block' : 'none';
 }
 
@@ -198,4 +245,4 @@ document.getElementById('month').addEventListener('change', render);
 })();
 </script>
 </body>
-</html>
+</html> 
