@@ -53,7 +53,7 @@ L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
 
 const SCALES = {
   rain: { min: 0,  max: 3000, stops: ['#f7fbff', '#6baed6', '#08306b'], name: 'Annual rainfall (mm)' },
-  dry:  { min: 0,  max: 1,    stops: ['#fff5eb', '#fd8d3c', '#7f2704'], name: 'Dryness score (0 to 1)' },
+  dry:  { min: 0,  max: 1,    stops: ['#fff5eb', '#fd8d3c', '#7f2704'], name: 'Dryness: relative ranking across India (not absolute)' },
   temp: { min: 10, max: 45,   stops: ['#2b83ba', '#ffffbf', '#d7191c'], name: 'Max temperature (°C)' }
 };
 const MONTHS = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -172,10 +172,14 @@ async function showInfo(p, s) {
 function setControls() {
   const layer = document.getElementById('layer').value;
   const year = document.getElementById('year');
+  const yearLabel = document.getElementById('yearLabel').parentElement;
   const minY = layer === 'temp' ? 1951 : 1901;
   year.min = minY;
   if (+year.value < minY) year.value = minY;
   document.getElementById('yearLabel').textContent = year.value;
+  const dryMode = layer === 'dry';
+  year.style.display = dryMode ? 'none' : 'block';
+  yearLabel.style.display = dryMode ? 'none' : 'block';
   document.getElementById('monthBox').style.display = layer === 'temp' ? 'block' : 'none';
 }
 
